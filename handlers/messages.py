@@ -1,19 +1,17 @@
-﻿import logging
+import logging
 import pytz
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
-from sqlalchemy import func, select
 
 from config import TARGET_CHAT_ID, TIMEZONE
 from database import (
     async_session_maker,
-    get_message_by_message_id,
+    find_and_update_edited_message,
+    get_db_stats,
     save_message,
-    update_edited_message,
     upsert_user,
 )
-from database.models import Message as DBMessage, User as DBUser
 from filters import contains_keywords
 from server import manager
 from services.checker import check_all_active_messages
@@ -22,22 +20,30 @@ logger = logging.getLogger(__name__)
 router = Router(name="messages_router")
 
 
-def format_msk_date(date_obj) -> str:
-    """Formats datetime to 'dd.mm.yyyy_HH.MM' in Moscow timezone."""
+def get_msk_datetimes(date_obj) -> tuple[str, str]:
+    """
+    Returns (table_name, formatted_date_str) in Moscow timezone.
+    table_name: 'dd.mm.yyyy' (e.g. '13.09.2026')
+    formatted_date_str: 'dd.mm.yyyy_HH.MM' (e.g. '13.09.2026_18.05')
+    """
     msk_tz = pytz.timezone(TIMEZONE)
     if date_obj.tzinfo is None:
         msk_date = pytz.utc.localize(date_obj).astimezone(msk_tz)
     else:
         msk_date = date_obj.astimezone(msk_tz)
-    return msk_date.strftime("%d.%m.%Y_%H.%M")
+
+    table_name = msk_date.strftime("%d.%m.%Y")
+    formatted_date_str = msk_date.strftime("%d.%m.%Y_%H.%M")
+    return table_name, formatted_date_str
 
 
 @router.message(Command("start", "help"))
 async def cmd_start(message: Message):
     text = (
         "🤖 **Бот Receiver MG Robot активен.**\n\n"
-        f"Целевая группа: {TARGET_CHAT_ID}\n"
-        "Отслеживаемые ключевые слова: *МГ, ОВЧ, Радиосеть, Ретранслятор, Алгоритм*.\n\n"
+        f"Целевая группа: `{TARGET_CHAT_ID}`\n"
+        "Отслеживаемые ключевые слова: *МГ, ОВЧ, Радиосеть, Ретранслятор, Алгоритм*.\n"
+        "Каждый день сообщения сохраняются в отдельную таблицу даты (`dd.mm.yyyy`).\n\n"
         "Команды:\n"
         "/status — статистика базы данных\n"
         "/check_deleted — принудительная проверка удалённых сообщений"
@@ -47,23 +53,21 @@ async def cmd_start(message: Message):
 
 @router.message(Command("status", "stats"))
 async def cmd_status(message: Message):
-    async with async_session_maker() as session:
-        users_count = await session.scalar(select(func.count(DBUser.id)))
-        msgs_count = await session.scalar(select(func.count(DBMessage.id)))
-        edited_count = await session.scalar(
-            select(func.count(DBMessage.id)).where(DBMessage.edit == 1)
-        )
-        deleted_count = await session.scalar(
-            select(func.count(DBMessage.id)).where(DBMessage.delete == 1)
-        )
+    stats = await get_db_stats()
+    tables_list = ", ".join(f"`{t}`" for t in stats["tables"][:5])
+    if len(stats["tables"]) > 5:
+        tables_list += f" и ещё {len(stats['tables']) - 5}"
+    elif not tables_list:
+        tables_list = "пока нет"
 
     response = (
         "📊 **Статистика базы данных:**\n"
-        f"• Пользователей: {users_count}\n"
-        f"• Сообщений сохранено: {msgs_count}\n"
-        f"• Отредактированных (edit=1): {edited_count}\n"
-        f"• Удалённых (delete=1): {deleted_count}\n"
-        f"• Активных WebSocket-клиентов: {len(manager.active_connections)}"
+        f"• Пользователей: `{stats['users_count']}`\n"
+        f"• Таблиц дат (дней): `{stats['tables_count']}` ({tables_list})\n"
+        f"• Сообщений сохранено: `{stats['msgs_count']}`\n"
+        f"• Отредактированных (edit=1): `{stats['edited_count']}`\n"
+        f"• Удалённых (delete=1): `{stats['deleted_count']}`\n"
+        f"• Активных WebSocket-клиентов: `{len(manager.active_connections)}`"
     )
     await message.answer(response, parse_mode="Markdown")
 
@@ -73,7 +77,7 @@ async def cmd_check_deleted(message: Message):
     status_msg = await message.answer("🔄 Запуск проверки удалённых сообщений...")
     count = await check_all_active_messages(message.bot)
     await status_msg.edit_text(
-        f"✅ Проверка завершена. Обнаружено и помечено удалёнными: {count} сообщений."
+        f"✅ Проверка завершена. Обнаружено и помечено удалёнными: `{count}` сообщений."
     )
 
 
@@ -81,7 +85,8 @@ async def cmd_check_deleted(message: Message):
 async def handle_new_group_message(message: Message):
     """
     Handles new messages in the target supergroup.
-    Checks keywords before saving to database and broadcasting via WebSocket.
+    Checks keywords, ensures today's date table exists, saves message,
+    and broadcasts NEW_MESSAGE to WebSocket clients.
     """
     raw_text = message.text or message.caption
     if not raw_text:
@@ -99,37 +104,29 @@ async def handle_new_group_message(message: Message):
         return
 
     username = from_user.username or f"user_{from_user.id}"
-    date_str = format_msk_date(message.date)
+    date_table_name, date_str = get_msk_datetimes(message.date)
 
     async with async_session_maker() as session:
-        # Upsert user
+        # Upsert user in global users table
         user = await upsert_user(session, tg_id=from_user.id, username=username)
 
-        # Save message
-        saved_msg = await save_message(
-            session=session,
-            user_username=user.username,
-            date_str=date_str,
-            text=raw_text,
-            message_id=message.message_id,
-        )
+    # Save message in the daily table corresponding to date_table_name
+    saved_msg = await save_message(
+        user_username=user.username,
+        date_str=date_str,
+        text_content=raw_text,
+        message_id=message.message_id,
+        date_table_name=date_table_name,
+    )
 
     # Broadcast NEW_MESSAGE to WebSocket clients
     await manager.broadcast({
         "type": "NEW_MESSAGE",
-        "data": {
-            "id": saved_msg.id,
-            "user": saved_msg.user,
-            "date": saved_msg.date,
-            "message": saved_msg.message,
-            "message_id": saved_msg.message_id,
-            "edit": saved_msg.edit,
-            "delete": saved_msg.delete,
-        },
+        "data": saved_msg,
     })
 
     logger.info(
-        f"Added message {message.message_id} from @{username} to DB and broadcasted to WebSocket."
+        f"Added message {message.message_id} from @{username} to table '{date_table_name}' and broadcasted."
     )
 
 
@@ -137,62 +134,53 @@ async def handle_new_group_message(message: Message):
 async def handle_edited_group_message(message: Message):
     """
     Handles edited messages in the target supergroup.
-    If the message was previously stored in DB, updates text, sets edit=1,
+    Finds the message in daily tables, updates text, sets edit=1,
     and broadcasts MESSAGE_EDITED to WebSocket clients.
     """
     raw_text = message.text or message.caption or ""
     message_id = message.message_id
+    date_table_name, date_str = get_msk_datetimes(message.date)
 
-    async with async_session_maker() as session:
-        existing = await get_message_by_message_id(session, message_id)
+    updated_msg = await find_and_update_edited_message(
+        message_id=message_id,
+        new_text=raw_text,
+        preferred_date_table=date_table_name,
+    )
 
-        if existing:
-            updated_msg = await update_edited_message(session, message_id, raw_text)
-            if updated_msg:
-                # Broadcast MESSAGE_EDITED
-                await manager.broadcast({
-                    "type": "MESSAGE_EDITED",
-                    "data": {
-                        "id": updated_msg.id,
-                        "user": updated_msg.user,
-                        "date": updated_msg.date,
-                        "message": updated_msg.message,
-                        "message_id": updated_msg.message_id,
-                        "edit": updated_msg.edit,
-                        "delete": updated_msg.delete,
-                    },
-                })
-            logger.info(
-                f"Updated edited message {message_id} in DB (edit=1) and broadcasted."
-            )
-        else:
-            # Message wasn't previously in DB, but edit now contains keywords
-            if contains_keywords(raw_text):
-                from_user = message.from_user
-                username = from_user.username if from_user and from_user.username else f"user_{from_user.id if from_user else 'unknown'}"
+    if updated_msg:
+        await manager.broadcast({
+            "type": "MESSAGE_EDITED",
+            "data": updated_msg,
+        })
+        logger.info(
+            f"Updated edited message {message_id} in DB (edit=1) and broadcasted."
+        )
+    else:
+        # Message wasn't previously in DB, but edit now contains keywords
+        if contains_keywords(raw_text):
+            from_user = message.from_user
+            username = from_user.username if from_user and from_user.username else f"user_{from_user.id if from_user else 'unknown'}"
+            async with async_session_maker() as session:
                 user = await upsert_user(session, tg_id=from_user.id, username=username)
-                date_str = format_msk_date(message.date)
-                saved = await save_message(
-                    session=session,
-                    user_username=user.username,
-                    date_str=date_str,
-                    text=raw_text,
-                    message_id=message_id,
-                )
-                updated_msg = await update_edited_message(session, message_id, raw_text)
-                target = updated_msg or saved
-                await manager.broadcast({
-                    "type": "MESSAGE_EDITED",
-                    "data": {
-                        "id": target.id,
-                        "user": target.user,
-                        "date": target.date,
-                        "message": target.message,
-                        "message_id": target.message_id,
-                        "edit": target.edit,
-                        "delete": target.delete,
-                    },
-                })
-                logger.info(
-                    f"Saved and broadcasted previously untracked message {message_id} after edit."
-                )
+
+            saved_msg = await save_message(
+                user_username=user.username,
+                date_str=date_str,
+                text_content=raw_text,
+                message_id=message_id,
+                date_table_name=date_table_name,
+            )
+            # Update to set edit=1
+            upd = await find_and_update_edited_message(
+                message_id=message_id,
+                new_text=raw_text,
+                preferred_date_table=date_table_name,
+            )
+            target = upd or saved_msg
+            await manager.broadcast({
+                "type": "MESSAGE_EDITED",
+                "data": target,
+            })
+            logger.info(
+                f"Saved and broadcasted previously untracked message {message_id} after edit."
+            )

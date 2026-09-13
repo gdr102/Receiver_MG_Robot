@@ -1,5 +1,5 @@
-﻿from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import DeclarativeBase, relationship
+from sqlalchemy import BigInteger, Column, ForeignKey, Integer, String, Table, Text
+from sqlalchemy.orm import DeclarativeBase
 
 
 class Base(DeclarativeBase):
@@ -13,32 +13,37 @@ class User(Base):
     tg_id = Column(BigInteger, unique=True, nullable=False, index=True)
     username = Column(String(255), unique=True, nullable=False, index=True)
 
-    messages = relationship("Message", back_populates="user_rel")
-
     def __repr__(self) -> str:
         return f"<User(id={self.id}, tg_id={self.tg_id}, username={self.username})>"
 
 
-class Message(Base):
-    __tablename__ = "messages"
+_daily_tables: dict[str, Table] = {}
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user = Column(
-        String(255),
-        ForeignKey("users.username", onupdate="CASCADE", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
+
+def get_daily_table(date_str: str) -> Table:
+    """
+    Returns or dynamically creates a SQLAlchemy Table definition for a specific date (e.g. '13.09.2026').
+    """
+    if date_str in _daily_tables:
+        return _daily_tables[date_str]
+
+    table = Table(
+        date_str,
+        Base.metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column(
+            "user",
+            String(255),
+            ForeignKey("users.username", onupdate="CASCADE", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+        Column("date", String(50), nullable=False),
+        Column("message", Text, nullable=False),
+        Column("message_id", BigInteger, unique=True, nullable=False, index=True),
+        Column("edit", Integer, default=0, nullable=False),
+        Column("delete", Integer, default=0, nullable=False),
+        extend_existing=True,
     )
-    date = Column(String(50), nullable=False)
-    message = Column(Text, nullable=False)
-    message_id = Column(BigInteger, unique=True, nullable=False, index=True)
-    edit = Column(Integer, default=0, nullable=False)
-    delete = Column(Integer, default=0, nullable=False)
-
-    user_rel = relationship("User", back_populates="messages")
-
-    def __repr__(self) -> str:
-        return (
-            f"<Message(id={self.id}, user='{self.user}', message_id={self.message_id}, "
-            f"edit={self.edit}, delete={self.delete})>"
-        )
+    _daily_tables[date_str] = table
+    return table

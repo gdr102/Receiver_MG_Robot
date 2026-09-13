@@ -1,10 +1,13 @@
-﻿import asyncio
+import asyncio
 import logging
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramRetryAfter
 
 from config import CHECK_DELETED_INTERVAL, TARGET_CHAT_ID
-from database import async_session_maker, get_active_messages, mark_message_deleted
+from database import (
+    get_all_active_messages,
+    mark_daily_message_deleted,
+)
 from server import manager
 
 logger = logging.getLogger(__name__)
@@ -23,7 +26,6 @@ async def is_message_deleted(bot: Bot, chat_id: int | str, message_id: int) -> b
         if "message to edit not found" in err_msg or "message not found" in err_msg:
             return True
         elif "message can't be edited" in err_msg:
-            # Message exists, but cannot be edited by bot
             return False
         logger.warning(f"Unexpected TelegramBadRequest for message {message_id}: {e.message}")
         return False
@@ -38,38 +40,35 @@ async def is_message_deleted(bot: Bot, chat_id: int | str, message_id: int) -> b
 
 async def check_all_active_messages(bot: Bot) -> int:
     """
-    Iterates over all active messages in DB (delete=0) and checks if they were deleted.
-    Marks them deleted in DB and broadcasts MESSAGE_DELETED event to WebSocket clients.
+    Iterates over all active messages (delete=0) across all daily tables.
+    Marks deleted messages with delete=1 and broadcasts MESSAGE_DELETED to WebSocket clients.
     """
-    async with async_session_maker() as session:
-        active_messages = await get_active_messages(session, limit=500)
-
+    active_messages = await get_all_active_messages()
     if not active_messages:
         return 0
 
     deleted_count = 0
-    for msg in active_messages:
-        deleted = await is_message_deleted(bot, TARGET_CHAT_ID, msg.message_id)
+    for table_name, msg in active_messages:
+        deleted = await is_message_deleted(bot, TARGET_CHAT_ID, msg["message_id"])
         if deleted:
-            async with async_session_maker() as session:
-                deleted_msg = await mark_message_deleted(session, msg.message_id)
-
+            deleted_msg = await mark_daily_message_deleted(
+                table_name=table_name, message_id=msg["message_id"]
+            )
             if deleted_msg:
-                # Broadcast MESSAGE_DELETED to WebSocket clients
                 await manager.broadcast({
                     "type": "MESSAGE_DELETED",
                     "data": {
-                        "id": deleted_msg.id,
-                        "user": deleted_msg.user,
-                        "message_id": deleted_msg.message_id,
-                        "edit": deleted_msg.edit,
-                        "delete": deleted_msg.delete,
+                        "id": deleted_msg["id"],
+                        "user": deleted_msg["user"],
+                        "message_id": deleted_msg["message_id"],
+                        "edit": deleted_msg["edit"],
+                        "delete": deleted_msg["delete"],
                     },
                 })
-
-            deleted_count += 1
-            logger.info(f"Message ID {msg.message_id} was deleted in Telegram. Broadcasted MESSAGE_DELETED.")
-        # Brief pause to respect Telegram API rate limits
+                deleted_count += 1
+                logger.info(
+                    f"Message {msg['message_id']} in table '{table_name}' was deleted in Telegram. Broadcasted."
+                )
         await asyncio.sleep(0.1)
 
     return deleted_count
@@ -77,7 +76,7 @@ async def check_all_active_messages(bot: Bot) -> int:
 
 async def run_deleted_checker_loop(bot: Bot, interval: int = CHECK_DELETED_INTERVAL) -> None:
     """
-    Background worker loop that periodically checks for deleted messages.
+    Background worker loop that periodically checks for deleted messages across daily tables.
     """
     logger.info(f"Background deleted messages checker started (interval={interval}s)")
     while True:

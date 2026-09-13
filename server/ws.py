@@ -1,11 +1,11 @@
-﻿import asyncio
+import asyncio
 import logging
 import os
 from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect, status
 import uvicorn
 
 from config import OD_SECRET_TOKEN, SSL_CERTFILE, SSL_KEYFILE, WS_HOST, WS_PORT
-from database import async_session_maker, get_recent_messages
+from database import get_recent_messages
 
 logger = logging.getLogger("websocket_server")
 
@@ -57,7 +57,6 @@ async def websocket_endpoint(
         logger.warning(
             f"Unauthorized WebSocket attempt from {client_ip}. Rejecting with code 4003."
         )
-        # Close immediately with 4003 (Policy Violation / Unauthorized) before handshake accept
         await websocket.close(
             code=status.WS_1008_POLICY_VIOLATION if hasattr(status, "WS_1008_POLICY_VIOLATION") else 4003,
             reason="Unauthorized: Invalid or missing secret token",
@@ -67,10 +66,9 @@ async def websocket_endpoint(
     # 2. Accept connection
     await manager.connect(websocket)
 
-    # 3. Send INIT_HISTORY with last 15 messages
+    # 3. Send INIT_HISTORY with last 15 messages across date tables
     try:
-        async with async_session_maker() as session:
-            recent_msgs = await get_recent_messages(session, limit=15)
+        recent_msgs = await get_recent_messages(limit=15)
 
         await websocket.send_json(
             {
