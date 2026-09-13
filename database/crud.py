@@ -174,44 +174,53 @@ async def find_and_update_edited_message(
     If found, updates message text and sets edit=1.
     Returns updated message dict.
     """
+    all_tables = await get_all_date_table_names()
+    if not all_tables:
+        return None
+
     tables_to_check = []
-    if preferred_date_table:
+    if preferred_date_table and preferred_date_table in all_tables:
         tables_to_check.append(preferred_date_table)
 
-    all_tables = await get_all_date_table_names()
     for t in all_tables:
         if t not in tables_to_check:
             tables_to_check.append(t)
 
     async with async_session_maker() as session:
         for t_name in tables_to_check:
-            table = get_daily_table(t_name)
-            stmt = select(table).where(table.c.message_id == message_id)
-            res = await session.execute(stmt)
-            row = res.mappings().one_or_none()
+            try:
+                table = get_daily_table(t_name)
+                stmt = select(table).where(table.c.message_id == message_id)
+                res = await session.execute(stmt)
+                row = res.mappings().one_or_none()
 
-            if row:
-                upd = (
-                    update(table)
-                    .where(table.c.message_id == message_id)
-                    .values(message=new_text, edit=1)
-                    .returning(
-                        table.c.id,
-                        table.c.user,
-                        table.c.date,
-                        table.c.message,
-                        table.c.message_id,
-                        table.c.edit,
-                        table.c.delete,
+                if row:
+                    upd = (
+                        update(table)
+                        .where(table.c.message_id == message_id)
+                        .values(message=new_text, edit=1)
+                        .returning(
+                            table.c.id,
+                            table.c.user,
+                            table.c.date,
+                            table.c.message,
+                            table.c.message_id,
+                            table.c.edit,
+                            table.c.delete,
+                        )
                     )
+                    upd_res = await session.execute(upd)
+                    await session.commit()
+                    updated_row = dict(upd_res.mappings().one())
+                    logger.info(
+                        f"Updated edited message {message_id} in table '{t_name}' (edit=1)"
+                    )
+                    return updated_row
+            except Exception as e:
+                logger.warning(
+                    f"Error checking table '{t_name}' for message {message_id}: {e}"
                 )
-                upd_res = await session.execute(upd)
-                await session.commit()
-                updated_row = dict(upd_res.mappings().one())
-                logger.info(
-                    f"Updated edited message {message_id} in table '{t_name}' (edit=1)"
-                )
-                return updated_row
+                continue
 
     return None
 
