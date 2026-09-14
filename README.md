@@ -1,11 +1,45 @@
-# Receiver_MG_Robot & WSS WebSocket Server
+# Receiver_MG_Robot 🤖 & WSS WebSocket Server
 
-Полностью асинхронный проект на Python (aiogram 3.x, FastAPI, Uvicorn, SQLAlchemy 2 / aiosqlite).
+Полностью асинхронный проект на Python (**aiogram 3.x**, **FastAPI**, **Uvicorn**, **SQLAlchemy 2 / aiosqlite**).
+
+---
+
+## 📋 Основной функционал
+
+1. **Telegram-бот в группе оперативного дежурного (-1004290775156)**:
+   - Принимает сообщения и фильтрует по ключевым словам: *МГ, ОВЧ, Радиосеть, Ретранслятор, Алгоритм*.
+   - Динамические таблицы дат (`dd.mm.yyyy`): каждый день создается новая суточная таблица.
+   - Отслеживание редактирования: `edit = 1` в соответствующей таблице даты.
+   - Фоновый чекер удалений: `delete = 1` при удалении сообщения в Telegram.
+
+2. **Личный чат с оператором (ID: 6373347786)**:
+   - Команда `/start` выводит подсказку:
+     `Чтобы получить статистику напишите период и время в формате "дд.мм.гггг чч.мм - дд.мм.гггг чч.мм".`
+   - При вводе периода (например: `13.09.2026 10.00 - 14.09.2026 18.00`):
+     - Бот выбирает все сообщения за указанный диапазон времени по всем суточным таблицам (исключая `delete=1`).
+     - Из текста сообщений извлекается название радиосети / подразделения (*«1 шб 22 ошбр»*, *«БТГр 222 омбр»*, *«212 омбр»*, *«н/у подразделения»*).
+     - Формируется отчёт с помощью **Rich Messages** (`aiogram.utils.formatting`):
+       - Таблица с границами и заголовками (`Bold`).
+       - Цифра количества радиограмм обёрнута в `Code()` — при клике/нажатии на число оно автоматически копируется в буфер обмена Telegram.
+       - Без инлайн-кнопок.
+       - Отправка через `await message.answer(**report_rich.as_kwargs())`.
+
+3. **Защищённый WebSocket-сервер (WSS)**:
+   - WSS (TLS/SSL) шифрование при наличии `cert.pem` и `key.pem`.
+   - Аутентификация по токену: `/ws?token=od_secret_super_key_2026` (код 4003 при ошибке).
+   - Мгновенный Broadcast: `NEW_MESSAGE`, `MESSAGE_EDITED`, `MESSAGE_DELETED`.
+   - История `INIT_HISTORY` и запросы по датам.
+
+---
 
 ## 🔐 Генерация SSL для WSS на VPS
+```bash
 openssl req -x509 -newkey rsa:4096 -nodes -keyout key.pem -out cert.pem -days 365 -subj "/CN=localhost"
+```
 
 ## 🚀 Запуск
-1. pip install -r requirements.txt
-2. python test_ws_and_bot.py
-3. python main.py
+```bash
+pip install -r requirements.txt
+python test_ws_and_bot.py
+python main.py
+```

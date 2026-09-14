@@ -10,6 +10,8 @@ PROXY_URL = os.getenv("PROXY_URL", "http://127.0.0.1:10809")
 CHECK_DELETED_INTERVAL = int(os.getenv("CHECK_DELETED_INTERVAL", "30"))
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
+AUTHORIZED_USER_ID = int(os.getenv("AUTHORIZED_USER_ID", "6373347786"))
+
 # WebSocket Server configuration
 OD_SECRET_TOKEN = os.getenv("OD_SECRET_TOKEN", "")
 WS_HOST = os.getenv("WS_HOST", "0.0.0.0")

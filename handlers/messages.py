@@ -4,20 +4,27 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from config import TARGET_CHAT_ID, TIMEZONE
+from config import AUTHORIZED_USER_ID, TARGET_CHAT_ID, TIMEZONE
 from database import (
     async_session_maker,
     find_and_update_edited_message,
     get_db_stats,
+    get_messages_by_period,
     save_message,
     upsert_user,
 )
 from filters import contains_keywords
 from server import manager
 from services.checker import check_all_active_messages
+from services.stats import (
+    create_stats_report,
+    parse_period,
+)
 
 logger = logging.getLogger(__name__)
 router = Router(name="messages_router")
+
+HELP_PROMPT = 'Чтобы получить статистику напишите период и время в формате "дд.мм.гггг чч.мм - дд.мм.гггг чч.мм".'
 
 
 def get_msk_datetimes(date_obj) -> tuple[str, str]:
@@ -37,18 +44,22 @@ def get_msk_datetimes(date_obj) -> tuple[str, str]:
     return table_name, formatted_date_str
 
 
-@router.message(Command("start", "help"))
+@router.message(Command("start"))
 async def cmd_start(message: Message):
+    """Replies to /start with the prompt to request period statistics."""
+    await message.answer(HELP_PROMPT)
+
+
+@router.message(Command("help"))
+async def cmd_help(message: Message):
     text = (
-        "🤖 **Бот Receiver MG Robot активен.**\n\n"
-        f"Целевая группа: `{TARGET_CHAT_ID}`\n"
-        "Отслеживаемые ключевые слова: *МГ, ОВЧ, Радиосеть, Ретранслятор, Алгоритм*.\n"
-        "Каждый день сообщения сохраняются в отдельную таблицу даты (`dd.mm.yyyy`).\n\n"
-        "Команды:\n"
-        "/status — статистика базы данных\n"
-        "/check_deleted — принудительная проверка удалённых сообщений"
+        "🤖 <b>Бот Receiver MG Robot активен.</b>\n\n"
+        f"Целевая группа: <code>{TARGET_CHAT_ID}</code>\n"
+        "Отслеживаемые ключевые слова: <i>МГ, ОВЧ, Радиосеть, Ретранслятор, Алгоритм</i>.\n"
+        "Каждый день сообщения сохраняются в отдельную таблицу даты (<code>dd.mm.yyyy</code>).\n\n"
+        f"{HELP_PROMPT}"
     )
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(text, parse_mode="HTML")
 
 
 @router.message(Command("status", "stats"))
@@ -79,6 +90,67 @@ async def cmd_check_deleted(message: Message):
     await status_msg.edit_text(
         f"✅ Проверка завершена. Обнаружено и помечено удалёнными: `{count}` сообщений."
     )
+
+
+# ---------------------------------------------------------------------------
+# Private Chat Messages (User 6373347786 Period Statistics)
+# ---------------------------------------------------------------------------
+
+
+@router.message(F.chat.type == "private")
+async def handle_private_message(message: Message):
+    """
+    Handles user messages in private chat.
+    Validates user authorization (ID: 6373347786).
+    Parses 'dd.mm.yyyy HH.MM - dd.mm.yyyy HH.MM' and returns a table of radio network statistics.
+    Digits are in <code> tags for instant copy-on-click in Telegram.
+    No buttons are added to the message.
+    """
+    from_user = message.from_user
+    if not from_user:
+        return
+
+    # Check authorized user
+    if AUTHORIZED_USER_ID and from_user.id != AUTHORIZED_USER_ID:
+        await message.answer("⛔ Доступ ограничен. Вы не авторизованы для работы с данным ботом.")
+        return
+
+    raw_text = (message.text or "").strip()
+
+    # Parse period
+    period = parse_period(raw_text)
+    if not period:
+        await message.answer(HELP_PROMPT)
+        return
+
+    start_dt, end_dt = period
+
+    status_wait = await message.answer("⏳ Выполняется подсчёт радиограмм за указанный период...")
+
+    # Query non-deleted messages in timeframe across all daily tables
+    messages = await get_messages_by_period(start_dt, end_dt)
+
+    if not messages:
+        await status_wait.edit_text(
+            f"Итого за период {raw_text}\n\n"
+            "Радиограмм за указанный период не найдено.\n\n"
+            f"{HELP_PROMPT}"
+        )
+        return
+
+    report_rich = create_stats_report(
+        period_str=raw_text,
+        messages=messages,
+    )
+
+    await status_wait.delete()
+    # Sent as Rich Message (aiogram.utils.formatting) with entities
+    await message.answer(**report_rich.as_kwargs())
+
+
+# ---------------------------------------------------------------------------
+# Group Message Handlers (Target Supergroup: -1004290775156)
+# ---------------------------------------------------------------------------
 
 
 @router.message(F.chat.id == TARGET_CHAT_ID)
@@ -159,7 +231,11 @@ async def handle_edited_group_message(message: Message):
         # Message wasn't previously in DB, but edit now contains keywords
         if contains_keywords(raw_text):
             from_user = message.from_user
-            username = from_user.username if from_user and from_user.username else f"user_{from_user.id if from_user else 'unknown'}"
+            username = (
+                from_user.username
+                if from_user and from_user.username
+                else f"user_{from_user.id if from_user else 'unknown'}"
+            )
             async with async_session_maker() as session:
                 user = await upsert_user(session, tg_id=from_user.id, username=username)
 

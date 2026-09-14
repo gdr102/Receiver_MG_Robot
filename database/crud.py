@@ -354,3 +354,57 @@ async def get_db_stats() -> dict:
         "tables_count": len(date_tables),
         "tables": date_tables,
     }
+
+
+async def get_messages_by_period(
+    start_dt: datetime, end_dt: datetime
+) -> list[dict]:
+    """
+    Queries all daily tables whose date falls within [start_dt.date(), end_dt.date()],
+    and returns all non-deleted (delete=0) messages where start_dt <= message_date <= end_dt.
+    """
+    all_tables = await get_all_date_table_names()
+    if not all_tables:
+        return []
+
+    target_tables = []
+    for t_name in all_tables:
+        try:
+            t_date = datetime.strptime(t_name, "%d.%m.%Y").date()
+            if start_dt.date() <= t_date <= end_dt.date():
+                target_tables.append(t_name)
+        except ValueError:
+            continue
+
+    # Chronological order (oldest day to newest day)
+    target_tables.sort(key=lambda name: datetime.strptime(name, "%d.%m.%Y"))
+
+    matched_messages = []
+    async with async_session_maker() as session:
+        for t_name in target_tables:
+            try:
+                table = get_daily_table(t_name)
+                stmt = (
+                    select(table)
+                    .where(table.c.delete == 0)
+                    .order_by(table.c.id.asc())
+                )
+                res = await session.execute(stmt)
+                rows = res.mappings().all()
+
+                for row in rows:
+                    date_raw = row["date"]
+                    try:
+                        msg_dt = datetime.strptime(date_raw, "%d.%m.%Y_%H.%M")
+                        if start_dt <= msg_dt <= end_dt:
+                            matched_messages.append(dict(row))
+                    except ValueError:
+                        continue
+            except Exception as e:
+                logger.warning(
+                    f"Error querying table '{t_name}' for period {start_dt}-{end_dt}: {e}"
+                )
+                continue
+
+    return matched_messages
+
