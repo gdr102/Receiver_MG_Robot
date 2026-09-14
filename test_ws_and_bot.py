@@ -13,12 +13,15 @@ from database import (
     get_all_active_messages,
     get_all_date_table_names,
     get_db_stats,
+    get_messages_for_date,
     get_recent_messages,
     init_db,
     mark_daily_message_deleted,
     save_message,
     upsert_user,
 )
+from database.crud import engine
+from sqlalchemy import text
 from filters import contains_keywords
 from handlers.messages import get_msk_datetimes
 from server import app, manager
@@ -26,6 +29,9 @@ from server import app, manager
 
 async def run_all_tests():
     print("=== 1. Testing Database & Dynamic Daily Tables ===")
+    async with engine.begin() as conn:
+        await conn.execute(text("DROP TABLE IF EXISTS [13.09.2026]"))
+        await conn.execute(text("DROP TABLE IF EXISTS [14.09.2026]"))
     await init_db()
 
     # Test Moscow date helper
@@ -97,12 +103,19 @@ async def run_all_tests():
     assert deleted["delete"] == 1
     print("[PASS] Deleted message updated with delete=1 in its daily table.")
 
-    # Test get_recent_messages (15 messages across both tables)
+    # Test get_messages_for_date
+    m13 = await get_messages_for_date("13.09.2026")
+    assert len(m13) == 10
+    m14 = await get_messages_for_date("14.09.2026")
+    assert len(m14) == 9
+    assert all(m["delete"] == 0 for m in m14)
+    print(f"[PASS] get_messages_for_date verified: 13.09={len(m13)}, 14.09={len(m14)} (deleted excluded).")
+
+    # Test get_recent_messages (15 messages across both tables, excluding deleted)
     recent = await get_recent_messages(limit=15)
     assert len(recent) == 15
-    # Oldest among recent 15 should be message 106 from 13.09.2026
-    assert recent[0]["message_id"] == 106
-    # Newest should be message 210 from 14.09.2026
+    # Total active msgs: 10 in 13th + 9 in 14th = 19. Limit 15 leaves out 4 oldest (101..104).
+    assert recent[0]["message_id"] == 105
     assert recent[-1]["message_id"] == 210
     print(f"[PASS] Retrieved {len(recent)} recent messages in chronological order.")
 
@@ -132,11 +145,27 @@ async def run_all_tests():
 
     # Test with valid token
     async with websockets.connect(f"{ws_url}?token={OD_SECRET_TOKEN}") as ws:
-        init_raw = await ws.recv()
-        init_json = json.loads(init_raw)
-        assert init_json["type"] == "INIT_HISTORY"
-        assert len(init_json["messages"]) == 15
-        print(f"[PASS] Client connected and received INIT_HISTORY ({len(init_json['messages'])} msgs).")
+        msg1 = json.loads(await ws.recv())
+        assert msg1["type"] == "AVAILABLE_DATES"
+        assert "14.09.2026" in msg1["dates"]
+        print(f"[PASS] Client received AVAILABLE_DATES: {msg1['dates']}.")
+
+        msg2 = json.loads(await ws.recv())
+        assert msg2["type"] == "DAY_MESSAGES"
+        print(f"[PASS] Client received DAY_MESSAGES for {msg2.get('date')}.")
+
+        msg3 = json.loads(await ws.recv())
+        assert msg3["type"] == "INIT_HISTORY"
+        assert len(msg3["messages"]) == 19
+        print(f"[PASS] Client received INIT_HISTORY ({len(msg3['messages'])} msgs).")
+
+        # Test request GET_DAY_MESSAGES
+        await ws.send(json.dumps({"action": "GET_DAY_MESSAGES", "date": "13.09.2026"}))
+        day_reply = json.loads(await ws.recv())
+        assert day_reply["type"] == "DAY_MESSAGES"
+        assert day_reply["date"] == "13.09.2026"
+        assert len(day_reply["messages"]) == 10
+        print(f"[PASS] Client requested & received 13.09.2026 messages ({len(day_reply['messages'])} msgs).")
 
         # Test broadcast NEW_MESSAGE
         new_event = {

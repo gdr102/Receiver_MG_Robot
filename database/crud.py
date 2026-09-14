@@ -276,10 +276,30 @@ async def get_all_active_messages() -> list[tuple[str, dict]]:
     return active_messages
 
 
-async def get_recent_messages(limit: int = 15) -> list[dict]:
+async def get_messages_for_date(date_str: str) -> list[dict]:
+    """
+    Returns all messages for a specific date table (format 'dd.mm.yyyy')
+    excluding deleted ones (delete=0), in chronological order (id ASC).
+    """
+    all_tables = await get_all_date_table_names()
+    if date_str not in all_tables:
+        return []
+
+    table = get_daily_table(date_str)
+    async with async_session_maker() as session:
+        stmt = (
+            select(table)
+            .where(table.c.delete == 0)
+            .order_by(table.c.id.asc())
+        )
+        res = await session.execute(stmt)
+        return [dict(r) for r in res.mappings().all()]
+
+
+async def get_recent_messages(limit: int = 100) -> list[dict]:
     """
     Returns the last `limit` messages across all daily tables
-    in chronological order for INIT_HISTORY.
+    excluding deleted ones (delete=0) in chronological order for INIT_HISTORY.
     """
     date_tables = await get_all_date_table_names()
     collected: list[dict] = []
@@ -292,6 +312,7 @@ async def get_recent_messages(limit: int = 15) -> list[dict]:
             table = get_daily_table(t_name)
             stmt = (
                 select(table)
+                .where(table.c.delete == 0)
                 .order_by(table.c.id.desc())
                 .limit(needed)
             )
