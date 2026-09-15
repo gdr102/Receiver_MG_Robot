@@ -1,8 +1,9 @@
+import html
 import logging
 import re
 from collections import defaultdict
 from datetime import datetime
-from aiogram.utils.formatting import Code, Text
+from aiogram.types import InputRichMessage
 
 logger = logging.getLogger(__name__)
 
@@ -63,18 +64,14 @@ def parse_period(text: str) -> tuple[datetime, datetime] | None:
 def create_stats_report(
     period_str: str,
     messages: list[dict],
-) -> Text:
+) -> InputRichMessage:
     """
-    Builds the statistics message formatted as:
-    Итого за период {period_str}
-
-    {unit} - {count} радиограмм
-    Чтобы получить статистику напишите период и время в формате "дд.мм.гггг чч.мм - дд.мм.гггг чч.мм".
-
-    Digits are wrapped in Code(count) so that clicking or tapping on the number
-    in Telegram copies it to the clipboard.
+    Builds the statistics report as an InputRichMessage with a native table.
+    Lists radio networks, message counts per network, and a 'Всего' total row.
     """
     unit_groups: dict[str, list[dict]] = defaultdict(list)
+    total_count = len(messages)
+
     for msg in messages:
         unit = extract_network(msg["message"])
         unit_groups[unit].append(msg)
@@ -83,20 +80,29 @@ def create_stats_report(
         unit_groups.items(), key=lambda item: len(item[1]), reverse=True
     )
 
-    elements: list = [
-        f"Итого за период {period_str}\n\n",
-    ]
-
+    rows_html = []
     for unit, msgs in sorted_units:
         count = len(msgs)
-        elements.extend([
-            f"{unit} - ",
-            Code(count),
-            " радиограмм\n",
-        ])
+        escaped_unit = html.escape(unit)
+        rows_html.append(
+            f"<tr><td>{escaped_unit}</td><td><code>{count}</code></td></tr>"
+        )
 
-    elements.append(
-        'Чтобы получить статистику напишите период и время в формате "дд.мм.гггг чч.мм - дд.мм.гггг чч.мм".'
+    # Add 'Всего' summary row
+    rows_html.append(
+        f"<tr><td><b>Всего</b></td><td><b><code>{total_count}</code></b></td></tr>"
     )
 
-    return Text(*elements)
+    table_rows = "".join(rows_html)
+    escaped_period = html.escape(period_str)
+
+    html_content = (
+        f"<p><b>Итого за период {escaped_period}</b></p>"
+        f"<table>"
+        f"<thead><tr><th>Радиосеть</th><th>Радиограмм</th></tr></thead>"
+        f"<tbody>{table_rows}</tbody>"
+        f"</table>"
+        f'<p>Чтобы получить статистику напишите период и время в формате "дд.мм.гггг чч.мм - дд.мм.гггг чч.мм".</p>'
+    )
+
+    return InputRichMessage(html=html_content)

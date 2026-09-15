@@ -144,8 +144,8 @@ async def handle_private_message(message: Message):
     )
 
     await status_wait.delete()
-    # Sent as Rich Message (aiogram.utils.formatting) with entities
-    await message.answer(**report_rich.as_kwargs())
+    # Sent as Rich Message with native table using sendRichMessage
+    await message.answer_rich(rich_message=report_rich)
 
 
 # ---------------------------------------------------------------------------
