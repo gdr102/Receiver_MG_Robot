@@ -1,8 +1,9 @@
 import logging
+import re
 import pytz
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
 from config import AUTHORIZED_USER_ID, TARGET_CHAT_ID, TIMEZONE
 from database import (
@@ -18,6 +19,7 @@ from server import manager
 from services.checker import check_all_active_messages
 from services.stats import (
     create_stats_report,
+    generate_stats_docx,
     parse_period,
 )
 
@@ -142,10 +144,22 @@ async def handle_private_message(message: Message):
         period_str=raw_text,
         messages=messages,
     )
+    docx_stream = generate_stats_docx(
+        period_str=raw_text,
+        messages=messages,
+    )
+
+    clean_period = re.sub(r"[^\w\.\-]+", "_", raw_text).strip("_")
+    doc_file = BufferedInputFile(
+        file=docx_stream.getvalue(),
+        filename=f"Статистика_{clean_period}.docx",
+    )
 
     await status_wait.delete()
-    # Sent as Rich Message with native table using sendRichMessage
+    # 1. Sent as Rich Message with bordered native table using sendRichMessage
     await message.answer_rich(rich_message=report_rich)
+    # 2. Sent Word (.docx) document file
+    await message.answer_document(document=doc_file)
 
 
 # ---------------------------------------------------------------------------

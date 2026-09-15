@@ -2,6 +2,7 @@ from services.checker import check_all_active_messages, is_message_deleted, run_
 from services.stats import (
     create_stats_report,
     extract_network,
+    generate_stats_docx,
     parse_period,
 )
 
@@ -12,4 +13,6 @@ __all__ = [
     "extract_network",
     "parse_period",
     "create_stats_report",
+    "generate_stats_docx",
 ]
+
