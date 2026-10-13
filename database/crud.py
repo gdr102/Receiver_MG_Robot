@@ -1,6 +1,7 @@
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+import pytz
 from sqlalchemy import (
     event,
     func,
@@ -11,7 +12,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-from config import DB_URL
+from config import DB_URL, TIMEZONE
 from database.models import Base, User, get_daily_table
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,60 @@ _created_tables: set[str] = set()
 DATE_TABLE_REGEX = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
 
 
+def parse_message_date(date_raw: str) -> datetime | None:
+    """
+    Parses message date string ('dd.mm.yyyy HH.MM' or legacy 'dd.mm.yyyy_HH.MM').
+    """
+    if not date_raw:
+        return None
+    normalized = date_raw.strip().replace("_", " ").replace(":", ".")
+    try:
+        return datetime.strptime(normalized, "%d.%m.%Y %H.%M")
+    except ValueError:
+        return None
+
+
+async def migrate_dates_format() -> int:
+    """
+    Replaces '_' with ' ' in the 'date' column across all existing date tables
+    (and legacy 'messages' table if present) so all old records match 'dd.mm.yyyy HH.MM'.
+    """
+    updated_total = 0
+    async with engine.begin() as conn:
+        result = await conn.execute(
+            text("SELECT name FROM sqlite_master WHERE type='table'")
+        )
+        names = [row[0] for row in result.fetchall()]
+
+        target_tables = [
+            name for name in names if DATE_TABLE_REGEX.match(name) or name == "messages"
+        ]
+
+        for t_name in target_tables:
+            try:
+                res = await conn.execute(
+                    text(
+                        f'UPDATE "{t_name}" SET date = REPLACE(date, \'_\', \' \') '
+                        f'WHERE date LIKE \'%_%\''
+                    )
+                )
+                if res.rowcount and res.rowcount > 0:
+                    updated_total += res.rowcount
+            except Exception as e:
+                logger.warning(f"Could not migrate dates in table '{t_name}': {e}")
+
+    if updated_total > 0:
+        logger.info(
+            f"Migrated {updated_total} old database records from 'dd.mm.yyyy_HH.MM' to 'dd.mm.yyyy HH.MM'."
+        )
+    return updated_total
+
+
 async def init_db() -> None:
-    """Initializes the database, creating the global users table."""
+    """Initializes the database, creating the global users table and migrating old date formats."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await migrate_dates_format()
     logger.info("Database initialized (base tables verified).")
 
 
@@ -126,6 +177,7 @@ async def save_message(
     """
     await ensure_daily_table(date_table_name)
     table = get_daily_table(date_table_name)
+    date_str = date_str.replace("_", " ")
 
     async with async_session_maker() as session:
         check_stmt = select(table).where(table.c.message_id == message_id)
@@ -357,21 +409,25 @@ async def get_db_stats() -> dict:
 
 
 async def get_messages_by_period(
-    start_dt: datetime, end_dt: datetime
+    start_dt: datetime, end_dt: datetime, include_deleted: bool = False
 ) -> list[dict]:
     """
     Queries all daily tables whose date falls within [start_dt.date(), end_dt.date()],
-    and returns all non-deleted (delete=0) messages where start_dt <= message_date <= end_dt.
+    and returns all messages where start_dt <= message_date <= end_dt.
+    By default excludes deleted messages (delete=0) unless include_deleted=True.
     """
     all_tables = await get_all_date_table_names()
     if not all_tables:
         return []
 
+    start_cmp = start_dt.replace(second=0, microsecond=0)
+    end_cmp = end_dt.replace(second=59, microsecond=999999)
+
     target_tables = []
     for t_name in all_tables:
         try:
             t_date = datetime.strptime(t_name, "%d.%m.%Y").date()
-            if start_dt.date() <= t_date <= end_dt.date():
+            if start_cmp.date() <= t_date <= end_cmp.date():
                 target_tables.append(t_name)
         except ValueError:
             continue
@@ -384,22 +440,21 @@ async def get_messages_by_period(
         for t_name in target_tables:
             try:
                 table = get_daily_table(t_name)
-                stmt = (
-                    select(table)
-                    .where(table.c.delete == 0)
-                    .order_by(table.c.id.asc())
-                )
+                if include_deleted:
+                    stmt = select(table).order_by(table.c.id.asc())
+                else:
+                    stmt = (
+                        select(table)
+                        .where(table.c.delete == 0)
+                        .order_by(table.c.id.asc())
+                    )
                 res = await session.execute(stmt)
                 rows = res.mappings().all()
 
                 for row in rows:
-                    date_raw = row["date"]
-                    try:
-                        msg_dt = datetime.strptime(date_raw, "%d.%m.%Y_%H.%M")
-                        if start_dt <= msg_dt <= end_dt:
-                            matched_messages.append(dict(row))
-                    except ValueError:
-                        continue
+                    msg_dt = parse_message_date(row["date"])
+                    if msg_dt and start_cmp <= msg_dt <= end_cmp:
+                        matched_messages.append(dict(row))
             except Exception as e:
                 logger.warning(
                     f"Error querying table '{t_name}' for period {start_dt}-{end_dt}: {e}"
@@ -407,4 +462,27 @@ async def get_messages_by_period(
                 continue
 
     return matched_messages
+
+
+async def get_messages_last_24h(include_deleted: bool = False) -> dict:
+    """
+    Returns all radiograms for the last 24 hours relative to current Moscow time.
+    """
+    try:
+        msk_tz = pytz.timezone(TIMEZONE)
+        now_msk = datetime.now(msk_tz).replace(tzinfo=None)
+    except Exception:
+        now_msk = datetime.now()
+
+    start_msk = now_msk - timedelta(hours=24)
+    messages = await get_messages_by_period(
+        start_msk, now_msk, include_deleted=include_deleted
+    )
+
+    return {
+        "from": start_msk.strftime("%d.%m.%Y %H.%M"),
+        "to": now_msk.strftime("%d.%m.%Y %H.%M"),
+        "count": len(messages),
+        "messages": messages,
+    }
 

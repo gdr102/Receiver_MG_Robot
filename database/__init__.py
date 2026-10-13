@@ -8,9 +8,12 @@ from database.crud import (
     get_db_stats,
     get_messages_by_period,
     get_messages_for_date,
+    get_messages_last_24h,
     get_recent_messages,
     init_db,
     mark_daily_message_deleted,
+    migrate_dates_format,
+    parse_message_date,
     save_message,
     upsert_user,
 )
@@ -23,6 +26,8 @@ __all__ = [
     "engine",
     "async_session_maker",
     "init_db",
+    "migrate_dates_format",
+    "parse_message_date",
     "ensure_daily_table",
     "get_all_date_table_names",
     "upsert_user",
@@ -32,6 +37,8 @@ __all__ = [
     "get_all_active_messages",
     "get_messages_for_date",
     "get_messages_by_period",
+    "get_messages_last_24h",
     "get_recent_messages",
     "get_db_stats",
 ]
+

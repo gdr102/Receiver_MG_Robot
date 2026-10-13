@@ -38,7 +38,7 @@ async def run_all_tests():
     sample_utc = datetime(2026, 9, 13, 15, 0, tzinfo=pytz.utc)
     table_name, date_str = get_msk_datetimes(sample_utc)
     assert table_name == "13.09.2026", f"Table name mismatch: {table_name}"
-    assert date_str == "13.09.2026_18.00", f"Date format mismatch: {date_str}"
+    assert date_str == "13.09.2026 18.00", f"Date format mismatch: {date_str}"
     print(f"[PASS] Date conversion verified: table='{table_name}', date='{date_str}'")
 
     # Test keyword filtering
@@ -59,11 +59,12 @@ async def run_all_tests():
     for i in range(1, 11):
         msg = await save_message(
             user_username="operator_alpha",
-            date_str=f"13.09.2026_10.{i:02d}",
+            date_str=f"13.09.2026 10.{i:02d}",
             text_content=f"Сообщение МГ #{i} от 13 сентября",
             message_id=100 + i,
             date_table_name="13.09.2026",
         )
+        assert "_" not in msg["date"], f"Underscore found in date: {msg['date']}"
         assert msg["edit"] == 0
         assert msg["delete"] == 0
 
@@ -71,11 +72,12 @@ async def run_all_tests():
     for i in range(1, 11):
         msg = await save_message(
             user_username="operator_alpha",
-            date_str=f"14.09.2026_11.{i:02d}",
+            date_str=f"14.09.2026 11.{i:02d}",
             text_content=f"Сообщение МГ #{i} от 14 сентября",
             message_id=200 + i,
             date_table_name="14.09.2026",
         )
+        assert "_" not in msg["date"], f"Underscore found in date: {msg['date']}"
         assert msg["edit"] == 0
         assert msg["delete"] == 0
 
@@ -128,7 +130,12 @@ async def run_all_tests():
     print(f"[PASS] DB stats verified: {stats}")
 
     print("\n=== 2. Testing WebSocket Server with Dynamic Tables ===")
-    test_port = 8092
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        test_port = s.getsockname()[1]
+
     config = uvicorn.Config(app=app, host="127.0.0.1", port=test_port, log_level="error")
     server = uvicorn.Server(config)
     server_task = asyncio.create_task(server.serve())
@@ -173,7 +180,7 @@ async def run_all_tests():
             "data": {
                 "id": 11,
                 "user": "operator_alpha",
-                "date": "14.09.2026_18.20",
+                "date": "14.09.2026 18.20",
                 "message": "Новая радиосеть активна",
                 "message_id": 999,
                 "edit": 0,
@@ -192,7 +199,7 @@ async def run_all_tests():
             "data": {
                 "id": 11,
                 "user": "operator_alpha",
-                "date": "14.09.2026_18.20",
+                "date": "14.09.2026 18.20",
                 "message": "Новая радиосеть активна (правка)",
                 "message_id": 999,
                 "edit": 1,
@@ -211,6 +218,8 @@ async def run_all_tests():
             "data": {
                 "id": 11,
                 "user": "operator_alpha",
+                "date": "14.09.2026 18.20",
+                "message": "Новая радиосеть активна (правка)",
                 "message_id": 999,
                 "edit": 1,
                 "delete": 1,
@@ -221,6 +230,33 @@ async def run_all_tests():
         assert received["type"] == "MESSAGE_DELETED"
         assert received["data"]["delete"] == 1
         print("[PASS] Broadcast MESSAGE_DELETED received by client.")
+
+    # Test /ws/24h endpoint
+    ws_24h_url = f"ws://127.0.0.1:{test_port}/ws/24h?token={OD_SECRET_TOKEN}"
+    async with websockets.connect(ws_24h_url) as ws24:
+        init_24h = json.loads(await ws24.recv())
+        assert init_24h["type"] == "LAST_24H_MESSAGES"
+        assert "from" in init_24h and "to" in init_24h and "messages" in init_24h
+        print(
+            f"[PASS] /ws/24h received LAST_24H_MESSAGES ({init_24h['count']} msgs, {init_24h['from']} - {init_24h['to']})."
+        )
+
+    # Test HTTP REST /api/messages/24h
+    import urllib.request
+
+    api_24h_url = f"http://127.0.0.1:{test_port}/api/messages/24h?token={OD_SECRET_TOKEN}"
+
+    def _fetch_24h():
+        with urllib.request.urlopen(api_24h_url) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+
+    status_code, body = await asyncio.to_thread(_fetch_24h)
+    assert status_code == 200
+    assert "from" in body and "to" in body and "messages" in body
+    assert "_" not in body["from"] and "_" not in body["to"]
+    print(
+        f"[PASS] GET /api/messages/24h verified ({body['count']} msgs, {body['from']} - {body['to']})."
+    )
 
     server.should_exit = True
     await server_task

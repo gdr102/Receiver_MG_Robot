@@ -33,7 +33,7 @@ def get_msk_datetimes(date_obj) -> tuple[str, str]:
     """
     Returns (table_name, formatted_date_str) in Moscow timezone.
     table_name: 'dd.mm.yyyy' (e.g. '13.09.2026')
-    formatted_date_str: 'dd.mm.yyyy_HH.MM' (e.g. '13.09.2026_18.05')
+    formatted_date_str: 'dd.mm.yyyy HH.MM' (e.g. '13.09.2026 18.05')
     """
     msk_tz = pytz.timezone(TIMEZONE)
     if date_obj.tzinfo is None:
@@ -42,7 +42,7 @@ def get_msk_datetimes(date_obj) -> tuple[str, str]:
         msk_date = date_obj.astimezone(msk_tz)
 
     table_name = msk_date.strftime("%d.%m.%Y")
-    formatted_date_str = msk_date.strftime("%d.%m.%Y_%H.%M")
+    formatted_date_str = msk_date.strftime("%d.%m.%Y %H.%M")
     return table_name, formatted_date_str
 
 

@@ -57,13 +57,7 @@ async def check_all_active_messages(bot: Bot) -> int:
             if deleted_msg:
                 await manager.broadcast({
                     "type": "MESSAGE_DELETED",
-                    "data": {
-                        "id": deleted_msg["id"],
-                        "user": deleted_msg["user"],
-                        "message_id": deleted_msg["message_id"],
-                        "edit": deleted_msg["edit"],
-                        "delete": deleted_msg["delete"],
-                    },
+                    "data": deleted_msg,
                 })
                 deleted_count += 1
                 logger.info(
